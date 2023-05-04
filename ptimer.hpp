@@ -208,7 +208,11 @@ void ptimer::print(){
 
     double global = 0.0;
 
-    std::vector<double> tmax(nch), tmin(nch), tavg(nch), favg(nch), bavg(nch);
+    double* tmax = new double[nch];
+    double* tmin = new double[nch];
+    double* tavg = new double[nch];
+    double* favg = new double[nch];
+    double* bavg = new double[nch];
 
     for(int i=0; i<nch; ++i){
         tmax[i] = channels[i].timer;
@@ -267,6 +271,12 @@ void ptimer::print(){
                     tavg[i]/(global>1e-30 ? global : 1.0)*100);
         }
     }
+
+    delete[] tmax;
+    delete[] tmin;
+    delete[] tavg;
+    delete[] favg;
+    delete[] bavg;
 }
 
 /* To reset all channels.
