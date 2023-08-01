@@ -1,9 +1,27 @@
+/* ptimer: a parallel timer for high-performance computing.
+ * Copyright (C) 2023 Xavier Alvarez Farre
+ * This file is part of ptimer <https://github.com/xafarre/ptimer>.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with ptimer. If not, see <http://www.gnu.org/licenses/>.
+ */
 #ifndef _xns_ptimer_
 #define _xns_ptimer_
 
 #include <cassert>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include "mpi.h"
 
@@ -25,12 +43,12 @@ namespace xns{
  *  Two methods are provided in ptimer class to control channels in user-specified control points: start and
  *  pause.
  *   · start(name): given a channel name, the method searches its channel list to find whether the chanel
- *    exists, or not. Thus, inserting a control point for the first time will create a new channel, while
- *    reaching the same control point multiple times will just increase the channel's calls counter.
+ *   exists, or not. Thus, inserting a control point for the first time will create a new channel, while
+ *   reaching the same control point multiple times will just increase the channel's calls counter.
  *
  *   · pause(name): given a channel name, the method searches its channel list to find whether the channel
- *    exists and is open, or not. If the channel exists and is open, the time, flops and memory traffic that
- *    ocurred after starting the channel will be accumulated. Otherwise, the application will crash.
+ *   exists and is open, or not. If the channel exists and is open, the time, flops and memory traffic that
+ *   ocurred after starting the channel will be accumulated. Otherwise, the application will crash.
  *
  *  Inserting a control point within an existing channel will create a new channel and consider it a nested
  *  child of the existing channel. Besides, if the name given to a nested control point is also used outside
@@ -159,13 +177,13 @@ ptimer::~ptimer(){
  * channel, ptimer will crash.
  */
 void ptimer::start(const char* const name){
-    /* to prevent nesting channels with the same name */
+    // to prevent nesting channels with the same name
     if(openid>=0){
         assert(std::strcmp(channels[openid].name, name) && "channel is already open");
     }
     int ch = this->search(name);
 
-    /* if channel is not found, create new channel */
+    // if channel is not found, create new channel
     if(ch<0){
         ch = this->create(name);
     }
@@ -173,7 +191,7 @@ void ptimer::start(const char* const name){
     nop++;
     openid = ch; // last opened channel
 
-    /* initial time is evaluated at the end to prevent overheads from the search routine */
+    // initial time is evaluated at the end to prevent overheads from the search routine
     channels[ch].open = true;
     channels[ch].flops -= flops;
     channels[ch].bytes -= bytes;
@@ -188,14 +206,14 @@ void ptimer::pause(const char* const name){
     assert(openid>=0 && "no cannel open");
     assert(!std::strcmp(channels[openid].name, name) && "channel is not open");
 
-    /* store the time, flop and data variables */
+    // store the time, flop and data variables
     channels[openid].timer += this->gettime();
     channels[openid].bytes += bytes;
     channels[openid].flops += flops;
     channels[openid].open = false;
     channels[openid].calls += 1;
 
-    /* if channel is not found, ptimer::pause will crash */
+    // if channel is not found, ptimer::pause will crash
     openid = channels[openid].outer; // the outer of the current channel becomes the current open channel
     nop--;
 }
@@ -222,11 +240,11 @@ void ptimer::print(){
         bavg[i] = channels[i].bytes;
     }
 
-    MPI_Allreduce(MPI_IN_PLACE, tmax.data(), nch, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, tmin.data(), nch, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, tavg.data(), nch, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, favg.data(), nch, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, bavg.data(), nch, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, tmax, nch, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, tmin, nch, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, tavg, nch, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, favg, nch, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, bavg, nch, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
     int world = 0;
 
@@ -308,7 +326,7 @@ int ptimer::create(const char* const name){
 
     std::strcpy(channels[nch].name, name);
 
-    /* store the already open channel into outer list; if no channel is open, outer is -1 */
+    // store the already open channel into outer list; if no channel is open, outer is -1
     channels[nch].level = nop;
     channels[nch].outer = openid;
 
