@@ -1,8 +1,6 @@
 #include "ptimer.hpp"
 #include "mpi.h"
 
-xns::ptimer chrono;
-
 void axpy(int n, double a, double* x, double* y){
     chrono.start("axpy");
     /* manually count flops and memory accesses */

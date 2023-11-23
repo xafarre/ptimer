@@ -56,13 +56,13 @@ namespace xns{
  *  below, the output will be given as shown in the right:
  *
  *    1. ptimer::start(one point)        |   PTIMER
- *    2.   *some calculations*           |    one point........INFO
+ *    2.   // some calculations          |    one point........INFO
  *    3. ptimer::start(another)          |     another.........INFO
- *    4.   *more calculations*           |    another..........INFO
+ *    4.   // more calculations          |    another..........INFO
  *    5. ptimer::pause(another)          |
  *    6. ptimer::pause(one point)        |
  *    7. ptimer::start(another)          |
- *    8.   *more stuff*                  |
+ *    8.   // more stuff                 |
  *    9. ptimer::pause(another)          |
  *
  *  This allows for fine-grained evaluation of kernels and functions. For instance, inside SpMV kernel the
@@ -206,15 +206,15 @@ void ptimer::pause(const char* const name){
     assert(openid>=0 && "no cannel open");
     assert(!std::strcmp(channels[openid].name, name) && "channel is not open");
 
-    // store the time, flop and data variables
+    // store the time, flop, and data variables
     channels[openid].timer += this->gettime();
     channels[openid].bytes += bytes;
     channels[openid].flops += flops;
     channels[openid].open = false;
     channels[openid].calls += 1;
 
-    // if channel is not found, ptimer::pause will crash
-    openid = channels[openid].outer; // the outer of the current channel becomes the current open channel
+    // the outer of the current channel becomes the current open channel
+    openid = channels[openid].outer;
     nop--;
 }
 
@@ -278,7 +278,7 @@ void ptimer::print(){
                 pname = " " + pname;
             }
 
-            printf("%-31s %6d %6.2f %6.2f %6.2f %6.2f %6.2f %6.2f\n",
+            printf("%-32s %5d %6.2f %6.2f %6.2f %6.2f %6.2f %6.2f\n",
                     pname.c_str(),
                     channels[i].calls,
                     favg[i]/tavg[i]/1e9,
@@ -330,6 +330,9 @@ int ptimer::create(const char* const name){
     channels[nch].level = nop;
     channels[nch].outer = openid;
 
+    /* Since C++ indexes from 0, we increase the variable nch after accessing the channel. The opposite is
+     * implemented in Fortran.
+     */
     return(nch++);
 }
 
@@ -352,4 +355,6 @@ bool ptimer::compare(const char* const name, const int ch){
 }
 
 }
+
+xns::ptimer chrono; // default global timer object
 #endif
