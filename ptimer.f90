@@ -30,11 +30,11 @@
 !
 !  Two methods are provided in ptimer class to control channels in user-specified control points: start and
 !  break.
-!   · start(name): given a channel name, the method searches its channel list to find whether the chanel
+!   · start(cname): given a channel name, the method searches its channel list to find whether the chanel
 !   exists, or not. Thus, inserting a control point for the first time will create a new channel, while
 !   reaching the same control point multiple times will just increase the channel's calls counter.
 !
-!   · break(name): given a channel name, the method searches its channel list to find whether the channel
+!   · break(cname): given a channel name, the method searches its channel list to find whether the channel
 !   exists and is open, or not. If the channel exists and is open, the time, flops and memory traffic that
 !   ocurred after starting the channel will be accumulated. Otherwise, the application will crash.
 !
@@ -94,8 +94,9 @@ MODULE xns_ptimer
     INTEGER :: level = 0 ! channel's nested level
     INTEGER :: outer = -1 ! id of parent channel
     INTEGER :: calls = 0 ! number of calls to channel
-    LOGICAL :: open = .false. ! status
-    CHARACTER(LEN=MAX_CHANNEL_LEN) :: name = "" ! channel's name
+    LOGICAL :: isopen = .false. ! status
+    LOGICAL :: issync = .true. ! synchronous channels must be coherent among all processes
+    CHARACTER(LEN=MAX_CHANNEL_LEN) :: cname = "" ! channel's name
   END TYPE chan_t
 
   ! Actual type for the ptimer object.
@@ -105,6 +106,7 @@ MODULE xns_ptimer
     REAL(dp) :: flops = 0.0 ! floating-point operations counter
     REAL(dp) :: bytes = 0.0 ! bytes counter
     INTEGER :: nch = 0 ! number of channels created
+    INTEGER :: sch = 0 ! number of synchronous channels created
     INTEGER :: nop = 0 ! current number of open channels
     INTEGER :: openid = 0 ! current open channel id
     TYPE(chan_t), DIMENSION(MAX_CHANNEL_NUM) :: channels ! array of channels
@@ -112,6 +114,8 @@ MODULE xns_ptimer
     CONTAINS
 
     PROCEDURE :: start
+    PROCEDURE :: start_sync
+    PROCEDURE :: start_self
     PROCEDURE :: break
     PROCEDURE :: report
     PROCEDURE :: reset
@@ -127,46 +131,67 @@ MODULE xns_ptimer
   ! channel exists, both the given name and the current open channel, openid, are evaluated. This allows
   ! to use the same name in different nested regions. If the channel name given is the same as the currently
   ! open channel, ptimer will crash.
-  SUBROUTINE start(this, name)
+  SUBROUTINE start(this, cname, issync)
     CLASS(ptimer), INTENT(INOUT) :: this
-    CHARACTER(LEN=*), INTENT(IN) :: name
+    CHARACTER(LEN=*), INTENT(IN) :: cname
+    LOGICAL, INTENT(IN), OPTIONAL :: issync 
 
     INTEGER :: ch
 
     ! To prevent nesting channels with the same name.
     IF(this%openid .NE. 0) THEN
-        IF(this%channels(this%openid)%name .EQ. name) THEN
-          STOP "channel is already open"
-        END IF
+      IF(this%channels(this%openid)%cname .EQ. cname) THEN
+        STOP "channel is already open"
+      END IF
     END IF
 
-    ch = search(this, name)
+    ch = search(this, cname)
 
     ! If channel is not found, create new channel.
     IF(ch .EQ. 0) THEN
-      ch = create(this, name)
+      IF(PRESENT(issync)) THEN
+        ch = create(this, cname, issync)
+      ELSE
+        ch = create(this, cname, .true.)
+      END IF
     END IF
 
     this%nop = this%nop + 1
     this%openid = ch ! last opened channel
 
     ! Initial time is evaluated at the end to prevent overheads from the search routine.
-    this%channels(ch)%open = .true.
+    this%channels(ch)%isopen = .true.
     this%channels(ch)%flops = this%channels(ch)%flops - this%flops
     this%channels(ch)%bytes = this%channels(ch)%bytes - this%bytes
     this%channels(ch)%timer = this%channels(ch)%timer - gettime()
   END SUBROUTINE start
 
+  ! The member method ptimer%start_sync resumes an existing channel or creates a new one with issync = true.
+  SUBROUTINE start_sync(this, cname)
+    CLASS(ptimer), INTENT(INOUT) :: this
+    CHARACTER(LEN=*), INTENT(IN) :: cname
+
+    CALL start(this, cname, .true.)
+  END SUBROUTINE start_sync
+
+  ! The member method ptimer%start_self resumes an existing channel or creates a new one with issync = false.
+  SUBROUTINE start_self(this, cname)
+    CLASS(ptimer), INTENT(INOUT) :: this
+    CHARACTER(LEN=*), INTENT(IN) :: cname
+
+    CALL start(this, cname, .false.)
+  END SUBROUTINE start_self
+
   ! The member method ptimer%break pauses an existing channel. To determine whether a chanel exists, both
   ! the given name and the current open channel, openid, are evaluated. In the case a channel is not found,
   ! or is found but was already closed, ptimer will crash.
-  SUBROUTINE break(this, name)
+  SUBROUTINE break(this, cname)
     CLASS(ptimer), INTENT(INOUT) :: this
-    CHARACTER(LEN=*), INTENT(IN) :: name
+    CHARACTER(LEN=*), INTENT(IN) :: cname
 
     IF(this%openid .EQ. 0) THEN
       STOP "no channel open"
-    ELSE IF(this%channels(this%openid)%name .NE. name) THEN
+    ELSE IF(this%channels(this%openid)%cname .NE. cname) THEN
       STOP "channel is not open"
     END IF
 
@@ -174,7 +199,7 @@ MODULE xns_ptimer
     this%channels(this%openid)%timer = this%channels(this%openid)%timer + gettime()
     this%channels(this%openid)%bytes = this%channels(this%openid)%bytes + this%bytes
     this%channels(this%openid)%flops = this%channels(this%openid)%flops + this%flops
-    this%channels(this%openid)%open = .false.
+    this%channels(this%openid)%isopen = .false.
     this%channels(this%openid)%calls = this%channels(this%openid)%calls + 1
 
     ! The outer of the current channel becomes the current open channel.
@@ -186,17 +211,27 @@ MODULE xns_ptimer
   ! 80 characters width.
   SUBROUTINE report(this)
     CLASS(ptimer), INTENT(INOUT) :: this
-
     REAL(dp), DIMENSION(:), ALLOCATABLE :: tmax, tmin, tavg, favg, bavg
-    REAL(dp) :: global
-    INTEGER :: nch, i, j
+    REAL(dp) :: tsum
+    INTEGER :: nch, sch, i, j
     INTEGER :: world, rank, ierr
     CHARACTER(LEN=MAX_CHANNEL_LEN) :: pname
+    CHARACTER(LEN=MAX_CHANNEL_LEN), DIMENSION(:), ALLOCATABLE :: cname_sync 
 
     nch = this%nch
-    global = 0.0
+    sch = this%sch
+    tsum = 0.0
 
-    ALLOCATE(tmax(nch), tmin(nch), tavg(nch), favg(nch), bavg(nch))
+    CALL MPI_COMM_SIZE(MPI_COMM_WORLD, world, ierr)
+
+    CALL MPI_ALLREDUCE(MPI_IN_PLACE, sch, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr)
+
+    ! Check if number of synchronous channels is consistent across all processes
+    IF (sch /= this%sch * world) THEN
+      STOP "number of synchronous channel is not consistent"
+    END IF
+
+    ALLOCATE(tmax(nch), tmin(nch), tavg(nch), favg(nch), bavg(nch), cname_sync(nch))
 
     DO i = 1, nch
       tmax(i) = this%channels(i)%timer
@@ -204,15 +239,25 @@ MODULE xns_ptimer
       tavg(i) = this%channels(i)%timer
       favg(i) = this%channels(i)%flops
       bavg(i) = this%channels(i)%bytes
+
+      IF (this%channels(i)%issync) THEN
+        ! Check that channel name is the same for all processes
+        cname_sync(i) = this%channels(i)%cname
+      
+        CALL MPI_ALLREDUCE(MPI_IN_PLACE, cname_sync(i), MAX_CHANNEL_LEN, MPI_CHARACTER, MPI_BAND, MPI_COMM_WORLD, ierr)
+
+        IF (TRIM(cname_sync(i)) /= TRIM(this%channels(i)%cname)) THEN
+          STOP "number of synchronous channel is not consistent across processes"
+        END IF
+
+        ! Perform MPI reductions for synchronous channels
+        CALL MPI_ALLREDUCE(MPI_IN_PLACE, tmax(i), 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
+        CALL MPI_ALLREDUCE(MPI_IN_PLACE, tmin(i), 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_WORLD, ierr)
+        CALL MPI_ALLREDUCE(MPI_IN_PLACE, tavg(i), 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+        CALL MPI_ALLREDUCE(MPI_IN_PLACE, favg(i), 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+        CALL MPI_ALLREDUCE(MPI_IN_PLACE, bavg(i), 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+      END IF
     END DO
-
-    CALL MPI_ALLREDUCE(MPI_IN_PLACE, tmax, nch, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, ierr)
-    CALL MPI_ALLREDUCE(MPI_IN_PLACE, tmin, nch, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_WORLD, ierr)
-    CALL MPI_ALLREDUCE(MPI_IN_PLACE, tavg, nch, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
-    CALL MPI_ALLREDUCE(MPI_IN_PLACE, favg, nch, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
-    CALL MPI_ALLREDUCE(MPI_IN_PLACE, bavg, nch, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
-
-    CALL MPI_COMM_SIZE(MPI_COMM_WORLD, world, ierr)
 
     DO i = 1, nch
       tavg(i) = tavg(i) / REAL(world, dp)
@@ -220,9 +265,11 @@ MODULE xns_ptimer
       bavg(i) = bavg(i) / REAL(world, dp)
 
       IF (this%channels(i)%level == 0) THEN
-        global = global + tavg(i)
+        tsum = tsum + tavg(i)
       END IF
     END DO
+
+    WRITE(*, '(F6.2)') tsum
 
     CALL MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierr)
 
@@ -234,13 +281,14 @@ MODULE xns_ptimer
       WRITE (*, '(G0)') "--------------------------------------------------------------------------------"
 
       DO i = 1, nch
-        pname = this%channels(i)%name
+        pname = this%channels(i)%cname
 
         DO j = 1, this%channels(i)%level
           pname = " " // pname
         END DO
 
-        WRITE(*, '(A32, 1X, I5, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, F6.2)') &
+        IF (this%channels(i)%issync) THEN
+          WRITE(*, '(A32, 1X, I5, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, F6.2)') &
             pname, &
             this%channels(i)%calls, &
             favg(i)/tavg(i)/1.0E9, &
@@ -248,7 +296,18 @@ MODULE xns_ptimer
             tavg(i), &
             tmax(i), &
             tmin(i), &
-            tavg(i)/MAX(global, 1.0e-30)*100
+            tavg(i)/MAX(tsum, 1.0e-30)*100
+        ELSE
+          WRITE(*, '(A32, 1X, I5, 1X, F6.2, 1X, F6.2, 1X, F6.2, 1X, A6, 1X, A6, 1X, F6.2)') &
+            pname, &
+            this%channels(i)%calls, &
+            favg(i)/tavg(i)/1.0E9, &
+            bavg(i)/tavg(i)/1.0E9, &
+            tavg(i), &
+            ' ', &
+            ' ', &
+            tavg(i)/MAX(tsum, 1.0e-30)*100
+        END IF
       END DO
     END IF
 
@@ -268,12 +327,15 @@ MODULE xns_ptimer
       this%channels(i)%level = 0
       this%channels(i)%outer = -1
       this%channels(i)%calls = 0
-      this%channels(i)%open = .false.
-      this%channels(i)%name = ""
+      this%channels(i)%isopen = .false.
+      this%channels(i)%issync = .true.
+      this%channels(i)%cname = ""
     END DO
+
     this%flops = 0.0
     this%bytes = 0.0
     this%nch = 0
+    this%sch = 0
     this%nop = 0
     this%openid = 0
   END SUBROUTINE reset
@@ -305,13 +367,14 @@ MODULE xns_ptimer
   END FUNCTION gettime
 
   ! To create new channels.
-  INTEGER FUNCTION create(this, name)
+  INTEGER FUNCTION create(this, cname, issync)
     CLASS(ptimer), INTENT(INOUT) :: this
-    CHARACTER(LEN=*), INTENT(IN) :: name
+    CHARACTER(LEN=*), INTENT(IN) :: cname
+    LOGICAL, INTENT(IN) :: issync
 
-    IF(LEN(name) .EQ. 0) THEN
+    IF(LEN(cname) .EQ. 0) THEN
       STOP "channel name is empty"
-    ELSE IF(LEN(name) .GE. MAX_CHANNEL_LEN) THEN
+    ELSE IF(LEN(cname) .GE. MAX_CHANNEL_LEN) THEN
       STOP "channel name is too long"
     ELSE IF(this%nch .GE. MAX_CHANNEL_NUM) THEN
       STOP "reached maximum number of channels"
@@ -322,21 +385,32 @@ MODULE xns_ptimer
     this%nch = this%nch + 1
     create = this%nch
 
+    ! Avoid creating synchronous channels within asynchronous ones.
+    IF(create .GT. 1) THEN
+      IF(this%openid .GT. 0) THEN
+        IF((this%channels(this%openid)%issync .EQ. .false.) .AND. (issync .EQ. .true.)) THEN
+          PRINT *, 'opening channel', cname, 'within', this%channels(this%openid)%cname
+          STOP "tried to open a synchronous channel within an asynchronous channel"
+        END IF
+      END IF
+    END IF
+
     ! Store the already open channel into outer list; if no channel is open, outer is 0.
-    this%channels(this%nch)%name = name
+    this%channels(this%nch)%cname = cname
     this%channels(this%nch)%level = this%nop
     this%channels(this%nch)%outer = this%openid
+    this%channels(this%nch)%issync = issync
   END FUNCTION create
 
   ! To search a given channel.
-  INTEGER FUNCTION search(this, name)
+  INTEGER FUNCTION search(this, cname)
     CLASS(ptimer), INTENT(INOUT) :: this
-    CHARACTER(LEN=*), INTENT(IN) :: name
+    CHARACTER(LEN=*), INTENT(IN) :: cname
 
     INTEGER :: ch
 
     DO ch=this%openid + 1, this%nch
-      IF(compare(this, name, ch)) THEN
+      IF(compare(this, cname, ch)) THEN
         search = ch
         RETURN
       END IF
@@ -345,11 +419,13 @@ MODULE xns_ptimer
   END FUNCTION search
 
   ! To compare a given channel.
-  LOGICAL FUNCTION compare(this, name, ch)
+  LOGICAL FUNCTION compare(this, cname, ch)
     CLASS(ptimer), INTENT(INOUT) :: this
-    CHARACTER(LEN=*), INTENT(IN) :: name
-    INTEGER, INTENT(IN)  :: ch
+    CHARACTER(LEN=*), INTENT(IN) :: cname
+    INTEGER, INTENT(IN) :: ch
 
-    compare = ((this%channels(ch)%name .EQ. name) .AND. (this%channels(ch)%outer .EQ. this%openid))
+    this%sch = this%sch + 1
+
+    compare = ((this%channels(ch)%cname .EQ. cname) .AND. (this%channels(ch)%outer .EQ. this%openid))
   END FUNCTION compare
 END MODULE xns_ptimer

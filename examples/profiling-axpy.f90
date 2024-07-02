@@ -5,11 +5,17 @@ PROGRAM main
 
   INTEGER, PARAMETER :: N = 1e8
   REAL(dp), ALLOCATABLE :: x(:), y(:)
-  INTEGER :: rank, size, ierr
+  INTEGER :: rank, ierr
   INTEGER :: i
 
   ! Initialize MPI
   CALL mpi_init(ierr)
+  CALL mpi_comm_rank(MPI_COMM_WORLD, rank, ierr)
+
+  IF (rank == 0) THEN
+    CALL chrono%start("master")
+  END IF
+
   CALL chrono%start("setup")
   CALL chrono%start("allocation")
   ALLOCATE(x(N), y(N))
@@ -27,6 +33,10 @@ PROGRAM main
   CALL axpy(N, REAL(0.0012, dp), y, x) 
   CALL chrono%break("compute")
 
+  IF (rank == 0) THEN
+    CALL chrono%break("master")
+  END IF
+
   CALL chrono%report()
 
   DEALLOCATE(x, y)
@@ -43,7 +53,7 @@ PROGRAM main
     REAL(dp), INTENT(INOUT) :: x(n), y(n)
     INTEGER :: i
   
-    CALL chrono%start("axpy")
+    CALL chrono%start_self("axpy")
     CALL chrono%add_flops(2*REAL(n, dp))
     CALL chrono%add_bytes(2*8*REAL(n, dp))
     ! manually count flops and memory accesses
